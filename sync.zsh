@@ -1,0 +1,1 @@
+rsync -av --exclude 'sync.zsh' ./* flatiron:hierarchical-vae/

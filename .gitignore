@@ -1,0 +1,22 @@
+.DS_Store
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Data files
+*.h5
+*.hdf5
+*.npy
+
+# Model weights
+*.pt
+
+.ipynb_checkpoints/
+slurm_logs/
+.vscode/
+vocalocator.egg-info/
+
+# Pip build directory
+build/
+dist/
