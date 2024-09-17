@@ -115,4 +115,11 @@ class SpecDataset(IterableDataset):
 
 def make_dataloader(data_path: Path, config: dict):
     dataset = SpecDataset(data_path, **config["dataloader"])
-    return DataLoader(dataset, batch_size=config["dataloader"]["batch_size"])
+    try:
+        # I think this function only exists on linux
+        avail_cpus = max(1, len(os.sched_getaffinity(0)) - 1)
+    except:
+        avail_cpus = max(1, os.cpu_count() - 1)
+    return DataLoader(
+        dataset, batch_size=config["dataloader"]["batch_size"], num_workers=avail_cpus
+    )
