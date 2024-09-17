@@ -336,4 +336,5 @@ def train(
         logger.info("")
     logger.info("Done.")
 
-    cleanup()
+    if world_size > 1:
+        cleanup()
