@@ -23,6 +23,7 @@ default_config = {
         "nfft": 1024,
         "noverlap": 1024 - 256,
         "nmels": 80,
+        "snippet_length": int(2**17),
     },
     "model": {
         "input_dim": 80,

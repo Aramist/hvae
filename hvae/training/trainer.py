@@ -323,7 +323,7 @@ def train(
             for _ in range(10000):
                 batch = next(val_iter)  # this one is also infinite...
                 losses.append(
-                    forward_pass(model, batch, rank, reduce_loss=False).cpu().numpy()[0]
+                    forward_pass(model, batch, rank, reduce_loss=False)[0].cpu().numpy()
                 )
         losses = np.concatenate(losses)
 
