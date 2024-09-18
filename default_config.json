@@ -1,0 +1,54 @@
+{
+    "optimization": {
+        "num_weight_updates": 100000,
+        "initial_learning_rate": 0.001,
+        "min_learning_rate": 1e-05,
+        "num_warmup_steps": 10000,
+        "num_decay_steps": 90000,
+        "momentum": 0.9,
+        "num_updates_per_log": 100,
+        "num_updates_per_ckpt": 10000
+    },
+    "dataloader": {
+        "batch_size": 16,
+        "nfft": 1024,
+        "noverlap": 896,
+        "nmels": 80,
+        "snippet_length": 131072
+    },
+    "model": {
+        "input_dim": 80,
+        "num_layers_per_block": 2,
+        "kernel_size": [
+            7,
+            7,
+            7,
+            7
+        ],
+        "num_channels": [
+            64,
+            64,
+            64,
+            64
+        ],
+        "dilation": [
+            3,
+            3,
+            2,
+            2
+        ],
+        "downsample_factors": [
+            16,
+            16,
+            16,
+            16
+        ],
+        "latent_dim": [
+            16,
+            16,
+            16,
+            16
+        ],
+        "mode": "top-down"
+    }
+}
