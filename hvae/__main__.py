@@ -5,34 +5,37 @@ from pathlib import Path
 import torch
 from torch import multiprocessing as mp
 
-from .training.trainer import train
+from .training.trainer import test, train
 
 default_config = {
     "optimization": {
-        "num_weight_updates": 1_000_000,
+        "num_weight_updates": 100_000,
         "initial_learning_rate": 1e-3,
         "min_learning_rate": 1e-5,
         "num_warmup_steps": 10_000,
-        "num_decay_steps": 100_000,
+        "num_decay_steps": 90_000,
         "momentum": 0.9,
         "num_updates_per_log": 100,
-        "num_updates_per_ckpt": 50_000,
+        "num_updates_per_ckpt": 10_000,
+        "loss_fn": "MSE",
     },
     "dataloader": {
         "batch_size": 16,
         "nfft": 1024,
-        "noverlap": 1024 - 256,
+        "noverlap": 1024 - 128,
         "nmels": 80,
         "snippet_length": int(2**17),
     },
     "model": {
         "input_dim": 80,
+        "num_timescales": 4,
         "num_layers_per_block": 2,
         "kernel_size": [7, 7, 7, 7],
         "num_channels": [64, 64, 64, 64],
         "dilation": [3, 3, 2, 2],
         "downsample_factors": [16, 16, 16, 16],
-        "latent_dim": [16, 16, 16, 16],
+        "latent_dim": [16, 32, 64, 128],
+        "mode": "top-down",
     },
 }
 
@@ -64,6 +67,11 @@ def parse_args():
         type=Path,
         help="Path to a directory where the output will be stored",
     )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Run the model in test mode to see sample reconstructions",
+    )
 
     return parser.parse_args()
 
@@ -84,6 +92,10 @@ def main():
     else:
         config = default_config
 
+    if args.test:
+        test(config, args.data, args.save_path)
+        return
+
     if torch.cuda.device_count() > 1:
         world_size = torch.cuda.device_count()
         print(f"Found {world_size} GPUs, using DDP")
@@ -94,7 +106,6 @@ def main():
             nprocs=world_size,
         )
     else:
-
         train(0, 1, config, args.data, args.save_path)
 
 

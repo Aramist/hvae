@@ -3,16 +3,17 @@ import os
 import time
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 import torch
 from torch import distributed as dist
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
+from tqdm import tqdm
 
 from ..utils.datasets import SpecDataset, make_dataloader
-from ..utils.logging import LoggerWrapper
+from ..utils.logging_wrapper import LoggerWrapper
 from .model import WaveNet
 
 
@@ -90,11 +91,11 @@ def initialize_for_training(
 
     if world_size > 1:
         model = model.to(rank)
-        model = DDP(model, device_ids=[rank], find_unused_parameters=False)
-        model.compile()
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        # model.compile()
     else:
         model = model.cuda()
-        model.compile()
+        # model.compile()
 
     # Ensure initial weights are synced across processes
     if world_size > 1:
@@ -155,7 +156,6 @@ def initialize_for_training(
     logger.info(repr(model))
 
     opt_config = config["optimization"]
-    total_num_updates = opt_config["num_weight_updates"]
 
     opt = optim.SGD(
         model.parameters(),
@@ -186,20 +186,31 @@ def initialize_for_training(
 
 
 def forward_pass(
-    model: WaveNet, batch: torch.Tensor, rank: int, reduce_loss: bool = True
+    model: WaveNet,
+    batch: torch.Tensor,
+    rank: int,
+    reduce_loss: bool = True,
+    loss_type: Literal["MSE", "IS"] = "MSE",
 ) -> torch.Tensor:
     audio = batch.to(rank)
 
     # encoding
-    posterior_params = model.encode(audio)
-    # samples = model.sample(posterior_params)
-    reconstruction = model.decode(posterior_params, num_timescales=1)
+    # posterior_params = model.encode(audio)
+    # reconstruction = model.decode(posterior_params, num_timescales=1)
+    posterior_params, reconstruction = model(audio)
 
     # Under a gaussian model of the likelihood p(x|z), the loss is a combination of MSE and KL divergence
-    recon_loss = torch.square(reconstruction - audio).flatten(start_dim=1).mean(dim=1)
+    if loss_type == "MSE":
+        recon_loss = (
+            torch.square(reconstruction - audio).flatten(start_dim=1).mean(dim=1)
+        )
+    else:
+        # IS loss rewritten to use log power spectrum
+        diff = audio - reconstruction
+        recon_loss = (torch.exp(diff) - diff - 1).flatten(start_dim=1).mean(dim=1)
     # Assuming a prior p(z) = N(0, I):
     means, log_variances = posterior_params[
-        -1
+        0
     ]  # each have shape (batch, num_latents, time)
 
     # Using eq from https://stats.stackexchange.com/questions/60680/kl-divergence-between-two-multivariate-gaussians
@@ -254,7 +265,13 @@ def train(
             batch = next(train_iter)  # infinite iterator
 
             opt.zero_grad()
-            loss, recon, kl = forward_pass(model, batch, rank, reduce_loss=True)
+            loss, recon, kl = forward_pass(
+                model,
+                batch,
+                rank,
+                reduce_loss=True,
+                loss_type=config["optimization"]["loss_fn"],
+            )
             loss.backward()
 
             # Did a batch fail?
@@ -320,7 +337,7 @@ def train(
 
         losses = []
         with torch.no_grad():
-            for _ in range(10000):
+            for _ in tqdm(range(200)):
                 batch = next(val_iter)  # this one is also infinite...
                 losses.append(
                     forward_pass(model, batch, rank, reduce_loss=False)[0].cpu().numpy()
@@ -338,3 +355,51 @@ def train(
 
     if world_size > 1:
         cleanup()
+
+
+def test(
+    config: dict,
+    data_path: Path,
+    save_directory: Path,
+):
+    model, _, _, _, test_dloader, _, logger = initialize_for_training(
+        0, 1, config, data_path, save_directory
+    )
+
+    model.eval()
+
+    orig = []
+    recon = []
+    posterior_params = []
+
+    test_iter = iter(test_dloader)
+    with torch.no_grad():
+        for _ in tqdm(range(1)):
+            batch = next(test_iter)
+            audio = batch.cuda()
+            posterior, reconstruction = model(audio)
+            orig.append(audio.cpu().numpy())
+            recon.append(reconstruction.cpu().numpy())
+            posterior_params.append(posterior)
+
+    orig = np.concatenate(orig).astype(np.float16)
+    np.save(save_directory / "orig.npy", orig)
+    recon = np.concatenate(recon).astype(np.float16)
+    np.save(save_directory / "recon.npy", recon)
+
+    means = {f"layer_{i}": [] for i in range(len(posterior_params[0]))}
+    log_vars = {f"layer_{i}": [] for i in range(len(posterior_params[0]))}
+
+    for batch in posterior_params:
+        for i, (mean, log_var) in enumerate(batch):
+            means[f"layer_{i}"].append(mean.cpu().numpy().astype(np.float16))
+            log_vars[f"layer_{i}"].append(log_var.cpu().numpy().astype(np.float16))
+
+    for i in range(len(posterior_params[0])):
+        np.save(
+            save_directory / f"means_layer_{i}.npy", np.concatenate(means[f"layer_{i}"])
+        )
+        np.save(
+            save_directory / f"log_vars_layer_{i}.npy",
+            np.concatenate(log_vars[f"layer_{i}"]),
+        )

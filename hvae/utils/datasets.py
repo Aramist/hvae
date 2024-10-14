@@ -9,10 +9,7 @@ from typing import Optional
 import h5py
 import numpy as np
 import torch
-import torchaudio
-from scipy.io import wavfile
 from torch.utils.data import DataLoader, IterableDataset
-from torchaudio.transforms import MelSpectrogram
 
 
 class SpecDataset(IterableDataset):
@@ -33,7 +30,6 @@ class SpecDataset(IterableDataset):
         self.snippet_length = snippet_length
 
         self.nfft = nfft
-        self.noverlap = noverlap
         self.nmels = nmels
         self.spec_min = spec_min
         self.spec_max = spec_max
@@ -52,7 +48,14 @@ class SpecDataset(IterableDataset):
             self.hop_length = f.attrs["hop_length"]
 
         with h5py.File(data_path, "r") as f:
-            self.dates_for_training = list(f.keys())
+            self.dates_for_training = filter(
+                lambda k: not k.endswith("events"), f.keys()
+            )
+            self.dates_for_training = filter(
+                lambda k: f"{k}_events" in f, self.dates_for_training
+            )
+            self.dates_for_training = list(self.dates_for_training)
+
             self.all_dates = self.dates_for_training.copy()
 
         if make_train_subset:
@@ -77,6 +80,9 @@ class SpecDataset(IterableDataset):
     def val_keys(self):
         return sorted(list(set(self.all_dates) - set(self.dates_for_training)))
 
+    def idx_for_time(self, time: float) -> int:
+        return int(time / self.dt)
+
     def __iter__(self):
         return self
 
@@ -84,33 +90,31 @@ class SpecDataset(IterableDataset):
         if self.hdf is None:
             self.hdf = h5py.File(self.data_path, "r")
         # sample a random date
-        date_idx = self.np_rng.random_integers(0, len(self.dates_for_training) - 1)
+        date_idx = self.np_rng.randint(0, len(self.dates_for_training))
         date = self.dates_for_training[date_idx]
+        events = self.hdf[f"{date}_events"]
 
-        # sample a random snippet
-        start = self.np_rng.random_integers(
-            0, self.hdf[date].shape[0] - self.snippet_length - 1
-        )
+        # sample a random event
+        event = self.np_rng.randint(0, len(events))
+        event_idx = self.idx_for_time(events[event])
+        start = max(0, event_idx - self.snippet_length)
 
         return self.get_snippet(date, start)
 
+    def get_snippet_time(self, date: str, start_idx: int) -> float:
+        time_since_start = start_idx * self.dt
+        # year_month_day_hour_minute_second
+        h, m, s = map(int, date.split("_")[3:6])
+        seconds_since_midnight = 3600 * h + 60 * m + s
+        return seconds_since_midnight + time_since_start
+
     def get_snippet(self, date: str, start_idx: int):
         spec = self.hdf[date][start_idx : start_idx + self.snippet_length, :].T
+        spec = np.log(spec + 1e-8)
         spec = (spec - self.spec_min) / (self.spec_max - self.spec_min)
         spec = np.clip(spec, 0, 1)
         spec = torch.from_numpy(spec).float()
         return spec  # shape is (time, features)
-
-    def _compute_mel_spectrogram(self, audio: torch.Tensor) -> torch.Tensor:
-        transform = MelSpectrogram(
-            sample_rate=self.sr,
-            n_fft=self.nfft,
-            hop_length=self.nfft - self.noverlap,
-            n_mels=self.nmels,
-            f_min=500,
-        )
-        audio = transform(audio)
-        return audio
 
 
 def make_dataloader(data_path: Path, config: dict):
@@ -123,3 +127,55 @@ def make_dataloader(data_path: Path, config: dict):
     return DataLoader(
         dataset, batch_size=config["dataloader"]["batch_size"], num_workers=avail_cpus
     )
+
+
+if __name__ == "__main__":
+    # test the statistics of the dataset using the default config
+    default_config = {
+        "optimization": {
+            "num_weight_updates": 100_000,
+            "initial_learning_rate": 1e-3,
+            "min_learning_rate": 1e-5,
+            "num_warmup_steps": 10_000,
+            "num_decay_steps": 90_000,
+            "momentum": 0.9,
+            "num_updates_per_log": 100,
+            "num_updates_per_ckpt": 10_000,
+        },
+        "dataloader": {
+            "batch_size": 16,
+            "nfft": 1024,
+            "noverlap": 1024 - 128,
+            "nmels": 80,
+            "snippet_length": int(2**17),
+            "spec_min": 7,
+            "spec_max": 13,
+        },
+        "model": {
+            "input_dim": 80,
+            "num_timescales": 4,
+            "num_layers_per_block": 2,
+            "kernel_size": [7, 7, 7, 7],
+            "num_channels": [64, 64, 64, 64],
+            "dilation": [3, 3, 2, 2],
+            "downsample_factors": [16, 16, 16, 16],
+            "latent_dim": [16, 32, 64, 128],
+            "mode": "top-down",
+        },
+    }
+
+    data_path = Path("/mnt/home/atanelus/ceph/hvae_dataset.hdf5")
+    dataset: SpecDataset = make_dataloader(data_path, default_config).dataset
+
+    # Sample a random snippet
+    snippet = next(iter(dataset))
+    print("Snippet shape:")
+    print(snippet.shape)
+    print("Snippet statistics:")
+    print("min, max")
+    print(snippet.min(), snippet.max())
+    print("mean, std")
+    print(snippet.mean(), snippet.std())
+    print("quantiles: 5%, 50%, 90%, 95%")
+    print(np.quantile(snippet.numpy(), [0.05, 0.50, 0.90, 0.95]))
+    print()

@@ -14,10 +14,13 @@
         "nfft": 1024,
         "noverlap": 896,
         "nmels": 80,
+        "spec_min": 7,
+        "spec_max": 13,
         "snippet_length": 131072
     },
     "model": {
         "input_dim": 80,
+        "num_timescales": 4,
         "num_layers_per_block": 2,
         "kernel_size": [
             7,

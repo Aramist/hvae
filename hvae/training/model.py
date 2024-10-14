@@ -1,5 +1,5 @@
 from math import ceil, floor
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
 from numpy import sqrt
@@ -20,6 +20,43 @@ def same_padding(kernel_size: int, dilation: int, stride: int) -> int:
     else:
         pad_amt = int((dilation * (kernel_size - 1) + 1 - stride) // 2) + 2
     return pad_amt
+
+
+class Swish(nn.Module):
+    def __init__(self):
+        super(Swish, self).__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.sigmoid(x)
+
+
+class TimeOfDayEmbedding(nn.Module):
+    def __init__(self, embedding_dim: int):
+        super(TimeOfDayEmbedding, self).__init__()
+        if embedding_dim % 2 != 0:
+            raise ValueError("Embedding dimension must be even")
+
+        self.embedding_dim = embedding_dim
+
+        self.time_embedding = nn.Sequential(
+            nn.Linear(128, embedding_dim),
+            Swish(),
+            nn.Linear(embedding_dim, embedding_dim),
+            Swish(),
+        )
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        """Embeds a time step tensor into a higher dimensional space using
+        a sin-cos positional embedding.
+        t: (batch,)"""
+        t = t[:, None]
+        denominator = 64
+        exponent = (
+            4 * torch.arange(denominator, device=t.device, dtype=t.dtype) / denominator
+        )
+        freq = (10**exponent)[None, :]
+        sincos = torch.cat([torch.sin(t * freq), torch.cos(t * freq)], dim=1)
+        return self.time_embedding(sincos)
 
 
 class Layer(nn.Module):
@@ -221,6 +258,9 @@ class WaveNet(nn.Module):
         lp_use_residual: bool = False,
         lp_use_batch_norm: bool = True,
         lp_use_dropout: bool = False,
+        mode: Literal["top-down", "bottom-up"] = "bottom-up",
+        num_timescales: int = 1,
+        use_time_of_day: bool = False,
     ):
         super(WaveNet, self).__init__()
         self.input_dim = input_dim
@@ -229,6 +269,9 @@ class WaveNet(nn.Module):
         self.dilations = dilation
         self.downsample_factors = downsample_factors
         self.latent_dims = latent_dim
+        self.mode = mode
+        self.num_timescales = num_timescales
+        self.use_time_of_day = use_time_of_day
 
         self.encoders = nn.ModuleList(
             [
@@ -311,7 +354,7 @@ class WaveNet(nn.Module):
         return True
 
     def encode(
-        self, x: torch.Tensor, num_timescales: int = 1
+        self, x: torch.Tensor, num_timescales: Optional[int] = None
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """Returns the parameters for the latent distribution(s)
         x: [batch, channels, time]
@@ -321,6 +364,9 @@ class WaveNet(nn.Module):
         """
         x = F.relu(self.input_conv(x))
         latent_params = []
+
+        if num_timescales is None:
+            num_timescales = self.num_timescales
 
         for i in range(num_timescales):
             enc = self.encoders[i]  # downsamples T -> T/S
@@ -346,22 +392,42 @@ class WaveNet(nn.Module):
             samples.append(z)
 
     def decode(
-        self, latent_samples: list[torch.Tensor], num_timescales: int = 1
+        self, latent_samples: list[torch.Tensor], num_timescales: Optional[int] = None
     ) -> torch.Tensor:
         """Computes the mean of the output distribution p(x | z)"""
         x = None
-        for i in range(num_timescales):
-            dec = self.decoders[-i]
-            expander = self.latent_unparametrization[-i]
+        if num_timescales is None:
+            num_timescales = self.num_timescales
 
-            mean, logvar = latent_samples[-i]
+        for i in range(num_timescales):
+            idx_to_use = num_timescales - i - 1 if self.mode == "bottom-up" else i
+            expander = self.latent_unparametrization[idx_to_use]
+
+            mean, logvar = latent_samples[idx_to_use]
             z = mean + torch.exp(0.5 * logvar) * torch.randn_like(mean)
             expz = expander(z)
             if x is None:
-                x = dec(expz)
+                x = self._stacked_decode(expz, idx_to_use + 1)
             else:
-                x = x + dec(expz)
-        return self.output_conv(x)
+                x = x + self._stacked_decode(expz, idx_to_use + 1)
+        return x
+
+    def _stacked_decode(
+        self, exp_latent: torch.Tensor, lowest_timescale: int
+    ) -> torch.Tensor:
+        """Decodes the latent variable at the lowest timescale to the finest timescale"""
+        for i in range(lowest_timescale):
+            exp_latent = self.decoders[lowest_timescale - i - 1](exp_latent)
+        return self.output_conv(exp_latent)
+
+    def forward(
+        self,
+        audio: torch.Tensor,
+        num_timescales: Optional[int] = None,
+    ) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], torch.Tensor]:
+        latent_params = self.encode(audio, num_timescales)
+        reconstruction = self.decode(latent_params, num_timescales)
+        return latent_params, reconstruction
 
 
 if __name__ == "__main__":
